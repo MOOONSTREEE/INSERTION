@@ -2,7 +2,6 @@ import paho.mqtt.client as mqtt
 import mysql.connector
 from mysql.connector import Error
 import time
-import hashlib
 from datetime import datetime
 
 # Détails du broker MQTT
@@ -11,7 +10,7 @@ port = 1883
 topics = ["IUT/Colmar2024/SAE2.04/Maison1", "IUT/Colmar2024/SAE2.04/Maison2"]
 
 # Détails de la base de données MySQL
-mysql_host = 'localhost'
+mysql_host = '10.252.15.12'
 mysql_database = 'capteursdb'
 mysql_user = 'root'
 mysql_password = 'Root1234'
@@ -32,10 +31,6 @@ except Error as e:
     print(f"Error: {e}")
     exit()
 
-def hash_id(sensor_id):
-    
-    return int(hashlib.sha256(sensor_id.encode()).hexdigest(), 16) % 10**8
-
 def on_connect(client, userdata, flags, rc):
     print(f"Connected with result code {rc}")
     for topic in topics:
@@ -46,23 +41,38 @@ def on_message(client, userdata, msg):
     message = msg.payload.decode()
     print(f"Received message: {message} on topic {msg.topic}")
 
-    # Traitement du message
-    data = dict(item.split("=") for item in message.split(","))
-    sensor_id = data['Id']
-    piece = data['piece']
-    date = data['date']
-    heure = data['time']
-    temp = float(data['temp'].replace(',', '.'))
-
-    # Convertir la date et l'heure en format TIMESTAMP MySQL
+    # Tentative de traitement du message
     try:
+        # Identifier et extraire la partie "temp"
+        temp_part = message.split("temp=")[1]
+        temp_value = temp_part.split(',')[0] if ',' in temp_part else temp_part
+        temp_value = float(temp_value.replace(',', '.'))
+
+        # Création d'un dictionnaire à partir du message sans la partie "temp"
+        message_without_temp = message.replace(f",temp={temp_part}", "")
+        data = dict(item.split("=") for item in message_without_temp.split(","))
+
+        # Ajouter la valeur de température au dictionnaire
+        data['temp'] = temp_value
+
+        # Vérification de toutes les clés requises
+        required_keys = {'Id', 'piece', 'date', 'heure'}
+        if not required_keys.issubset(data.keys()):
+            required_keys = {'Id', 'piece', 'date', 'time'}
+            if not required_keys.issubset(data.keys()):
+                raise ValueError(f"Missing keys in message: {data}")
+
+        # Extraction des données
+        sensor_id = data['Id']
+        piece = data['piece']
+        date = data['date']
+        heure = data.get('time', data.get('heure'))  # Gestion des deux cas 'time' et 'heure'
+        temp = data['temp']
+
+        # Convertir la date et l'heure en format TIMESTAMP MySQL
         timestamp = datetime.strptime(f"{date} {heure}", "%d/%m/%Y %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError as e:
-        print(f"Failed to parse datetime: {e}")
-        return
 
-    # Vérification et insertion dans la table capteurs
-    try:
+        # Vérification et insertion dans la base de données
         cursor.execute("SELECT ID FROM Capteurs WHERE NomCapteur = %s", (sensor_id,))
         result = cursor.fetchone()
         if result is None:
@@ -72,15 +82,13 @@ def on_message(client, userdata, msg):
             result = cursor.fetchone()
         
         capteur_id = result[0]
-
-        # Insertion dans la table donnees
         cursor.execute(
             "INSERT INTO Donnees (CapteurID, Timestamp, Valeur) VALUES (%s, %s, %s)",
             (capteur_id, timestamp, temp)
         )
         connection.commit()
-    except Error as e:
-        print(f"Failed to insert into MySQL table {e}")
+    except Exception as e:
+        print(f"Failed to process message: {e}")
 
 def main():
     client = mqtt.Client()
