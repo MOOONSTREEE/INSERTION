@@ -1,0 +1,107 @@
+import paho.mqtt.client as mqtt
+import mysql.connector
+from mysql.connector import Error
+import time
+import hashlib
+from datetime import datetime
+
+# Détails du broker MQTT
+broker = "test.mosquitto.org"
+port = 1883
+topics = ["IUT/Colmar2024/SAE2.04/Maison1", "IUT/Colmar2024/SAE2.04/Maison2"]
+
+# Détails de la base de données MySQL
+mysql_host = 'localhost'
+mysql_database = 'capteursdb'
+mysql_user = 'root'
+mysql_password = 'Root1234'
+
+# Connexion à la base de données MySQL
+try:
+    connection = mysql.connector.connect(
+        host=mysql_host,
+        database=mysql_database,
+        user=mysql_user,
+        password=mysql_password
+    )
+    if connection.is_connected():
+        cursor = connection.cursor()
+        print("Connected to MySQL database")
+
+except Error as e:
+    print(f"Error: {e}")
+    exit()
+
+def hash_id(sensor_id):
+    
+    return int(hashlib.sha256(sensor_id.encode()).hexdigest(), 16) % 10**8
+
+def on_connect(client, userdata, flags, rc):
+    print(f"Connected with result code {rc}")
+    for topic in topics:
+        client.subscribe(topic)
+        print(f"Subscribed to {topic}")
+
+def on_message(client, userdata, msg):
+    message = msg.payload.decode()
+    print(f"Received message: {message} on topic {msg.topic}")
+
+    # Traitement du message
+    data = dict(item.split("=") for item in message.split(","))
+    sensor_id = data['Id']
+    piece = data['piece']
+    date = data['date']
+    heure = data['time']
+    temp = float(data['temp'].replace(',', '.'))
+
+    # Convertir la date et l'heure en format TIMESTAMP MySQL
+    try:
+        timestamp = datetime.strptime(f"{date} {heure}", "%d/%m/%Y %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError as e:
+        print(f"Failed to parse datetime: {e}")
+        return
+
+    # Vérification et insertion dans la table capteurs
+    try:
+        cursor.execute("SELECT ID FROM Capteurs WHERE NomCapteur = %s", (sensor_id,))
+        result = cursor.fetchone()
+        if result is None:
+            cursor.execute("INSERT INTO Capteurs (NomCapteur, Piece) VALUES (%s, %s)", (sensor_id, piece))
+            connection.commit()
+            cursor.execute("SELECT ID FROM Capteurs WHERE NomCapteur = %s", (sensor_id,))
+            result = cursor.fetchone()
+        
+        capteur_id = result[0]
+
+        # Insertion dans la table donnees
+        cursor.execute(
+            "INSERT INTO Donnees (CapteurID, Timestamp, Valeur) VALUES (%s, %s, %s)",
+            (capteur_id, timestamp, temp)
+        )
+        connection.commit()
+    except Error as e:
+        print(f"Failed to insert into MySQL table {e}")
+
+def main():
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    client.connect(broker, port, 60)
+
+    client.loop_start()
+    try:
+        while True:
+            time.sleep(5)  # Pause de 5 secondes entre chaque récupération de données
+    except KeyboardInterrupt:
+        client.loop_stop()
+        print("Exiting...")
+
+if __name__ == "__main__":
+    main()
+
+    # Fermer la connexion MySQL
+    if connection.is_connected():
+        cursor.close()
+        connection.close()
+        print("MySQL connection is closed")
